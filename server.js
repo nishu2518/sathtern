@@ -156,11 +156,23 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (req.method === 'GET' && req.url === '/') {
-    sendJson(res, 200, { ok: true, service: 'Sathtern Cashfree backend' }, origin);
+    sendJson(res, 200, {
+      ok: true,
+      service: 'Sathtern Cashfree backend',
+      paymentEndpoint: '/create-cashfree-order'
+    }, origin);
     return;
   }
 
-  if (req.method === 'POST' && req.url === '/create-cashfree-order') {
+  if (req.method === 'GET' && req.url === '/create-cashfree-order') {
+    sendJson(res, 200, {
+      ok: true,
+      message: 'Use POST /create-cashfree-order from the Sathtern website.'
+    }, origin);
+    return;
+  }
+
+  if (req.method === 'POST' && (req.url === '/create-cashfree-order' || req.url === '/')) {
     await createCashfreeOrder(req, res, origin);
     return;
   }
