@@ -2,7 +2,8 @@ const http = require('http');
 
 const ALLOWED_ITEMS = new Map([
   ['certificate', { name: 'Certificate of Completion', price: 199 }],
-  ['lor', { name: 'Letter of Recommendation (LOR)', price: 199 }]
+  ['lor', { name: 'Letter of Recommendation (LOR)', price: 199 }],
+  ['offer', { name: 'Offer Letter', price: 199 }]
 ]);
 
 const allowedOrigins = new Set([
@@ -61,7 +62,7 @@ function validateOrder(body) {
   const name = String(body.name || '').trim();
 
   if (!email || !phone || !name) throw new Error('Student name, email, and phone are required.');
-  if (!items.length || items.length > 2) throw new Error('Select Certificate, LOR, or both.');
+  if (!items.length || items.length > 3) throw new Error('Select Certificate, LOR, Offer Letter, or any combination.');
 
   const cleanItems = items.map(item => {
     const allowed = ALLOWED_ITEMS.get(item.id);
