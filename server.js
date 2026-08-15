@@ -1,4 +1,10 @@
 const http = require('http');
+const admin = require('firebase-admin');
+
+const firebaseProjectId = process.env.FIREBASE_PROJECT_ID || 'sathtern-2bce6';
+if (!admin.apps.length) {
+  admin.initializeApp({ projectId: firebaseProjectId });
+}
 
 const ALLOWED_ITEMS = new Map([
   ['certificate', { name: 'Certificate of Completion', price: 199 }],
@@ -9,6 +15,8 @@ const ALLOWED_ITEMS = new Map([
 const allowedOrigins = new Set([
   'http://localhost:5000',
   'http://127.0.0.1:5000',
+  'http://localhost:5002',
+  'http://127.0.0.1:5002',
   'https://sathtern-2bce6.web.app',
   'https://sathtern.in',
   'https://www.sathtern.in'
@@ -18,7 +26,7 @@ function sendJson(res, status, body, origin) {
   const headers = {
     'Content-Type': 'application/json',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
-    'Access-Control-Allow-Headers': 'Content-Type'
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
   };
   if (allowedOrigins.has(origin)) {
     headers['Access-Control-Allow-Origin'] = origin;
@@ -52,6 +60,13 @@ function getCashfreeBaseUrl() {
   return (process.env.CASHFREE_ENV || 'sandbox') === 'production'
     ? 'https://api.cashfree.com/pg'
     : 'https://sandbox.cashfree.com/pg';
+}
+
+async function verifyFirebaseUser(req) {
+  const authHeader = req.headers.authorization || '';
+  const match = authHeader.match(/^Bearer\s+(.+)$/i);
+  if (!match) throw new Error('Login is required to create a payment order.');
+  return admin.auth().verifyIdToken(match[1]);
 }
 
 function validateOrder(body) {
@@ -98,10 +113,20 @@ async function createCashfreeOrder(req, res, origin) {
   }
 
   let order;
+  let decodedToken;
   try {
-    order = validateOrder(await getBody(req));
+    const body = await getBody(req);
+    decodedToken = await verifyFirebaseUser(req);
+    order = validateOrder(body);
+    if (order.uid !== decodedToken.uid || order.email !== decodedToken.email) {
+      sendJson(res, 403, { error: 'Payment user does not match the logged-in account.' }, origin);
+      return;
+    }
   } catch (error) {
-    sendJson(res, 400, { error: error.message }, origin);
+    const message = error.code && String(error.code).startsWith('auth/')
+      ? 'Login is required to create a payment order.'
+      : error.message;
+    sendJson(res, message.includes('Login is required') ? 401 : 400, { error: message }, origin);
     return;
   }
 
@@ -132,9 +157,9 @@ async function createCashfreeOrder(req, res, origin) {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) {
+      console.error('Cashfree order creation failed:', data);
       sendJson(res, response.status, {
-        error: data.message || data.error_description || data.type || 'Cashfree order creation failed.',
-        cashfree: data
+        error: data.message || data.error_description || data.type || 'Cashfree order creation failed.'
       }, origin);
       return;
     }
@@ -185,3 +210,4 @@ const port = process.env.PORT || 10000;
 server.listen(port, () => {
   console.log(`Sathtern Cashfree backend listening on ${port}`);
 });
+
