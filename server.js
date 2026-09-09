@@ -276,6 +276,18 @@ async function generateSkillCertificateId(db) {
   return `SAT-SC-${year}-${Date.now().toString().slice(-4)}`;
 }
 
+function skillCertificateClaimId(uid, courseId) {
+  return `${uid}_${courseId}`.replace(/[^a-zA-Z0-9_-]/g, '_');
+}
+
+function skillCourseIdentity(value) {
+  return String(value?.courseTitle || value?.title || value?.domain || value?.domainName || value?.courseId || value?.id || 'skill-course')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '') || 'skill-course';
+}
+
 async function claimSkillCertificate(req, res, origin) {
   let decodedToken;
   let body;
@@ -307,17 +319,6 @@ async function claimSkillCertificate(req, res, origin) {
       throw new Error('This account has not passed the skill course.');
     }
 
-    const existing = await db.collection('certificates')
-      .where('uid', '==', decodedToken.uid)
-      .where('courseId', '==', courseId)
-      .where('type', '==', 'skill_course')
-      .limit(1)
-      .get();
-    if (!existing.empty) {
-      sendJson(res, 200, { certificateId: existing.docs[0].id, alreadyIssued: true }, origin);
-      return;
-    }
-
     if (!isFree) {
       await verifyPaidCashfreeOrder({
         orderId,
@@ -327,42 +328,77 @@ async function claimSkillCertificate(req, res, origin) {
       });
     }
 
-    const certId = await generateSkillCertificateId(db);
-    const issuedAt = admin.firestore.FieldValue.serverTimestamp();
     const courseTitle = course.title || course.domainName || attempt.courseTitle || 'Skill Course';
     const domainName = course.domainName || attempt.domainName || '';
     const level = course.level || attempt.level || 'beginner';
-    const batch = db.batch();
-    batch.set(db.collection('skillCertificateOrders').doc(certId), {
-      uid: decodedToken.uid,
-      email: String(decodedToken.email || '').toLowerCase(),
-      studentName: attempt.studentName || decodedToken.name || decodedToken.email || '',
-      courseId,
-      courseTitle,
-      domainName,
-      level,
-      amount: price,
-      currency: 'INR',
-      paymentStatus: isFree ? 'free' : 'paid',
-      cashfreeOrderId: isFree ? '' : orderId,
-      verifiedByBackend: true,
-      createdAt: issuedAt
+    const courseIdentity = skillCourseIdentity({ courseTitle, domainName, courseId });
+    const claimRef = db.collection('skillCertificateClaims').doc(skillCertificateClaimId(decodedToken.uid, courseIdentity));
+    const certId = await db.runTransaction(async transaction => {
+      const claimSnap = await transaction.get(claimRef);
+      if (claimSnap.exists && claimSnap.data().certificateId) {
+        return claimSnap.data().certificateId;
+      }
+
+      const existing = await transaction.get(db.collection('certificates')
+        .where('uid', '==', decodedToken.uid)
+        .where('type', '==', 'skill_course')
+        .limit(50));
+      const matchingExisting = existing.docs
+        .map(doc => ({ id: doc.id, ...doc.data() }))
+        .find(cert => skillCourseIdentity(cert) === courseIdentity);
+      if (matchingExisting) {
+        const existingId = matchingExisting.id;
+        transaction.set(claimRef, {
+          uid: decodedToken.uid,
+          courseId,
+          courseIdentity,
+          certificateId: existingId,
+          repairedFromExisting: true,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp()
+        }, { merge: true });
+        return existingId;
+      }
+
+      const nextCertId = await generateSkillCertificateId(db);
+      const issuedAt = admin.firestore.FieldValue.serverTimestamp();
+      transaction.set(db.collection('skillCertificateOrders').doc(nextCertId), {
+        uid: decodedToken.uid,
+        email: String(decodedToken.email || '').toLowerCase(),
+        studentName: attempt.studentName || decodedToken.name || decodedToken.email || '',
+        courseId,
+        courseTitle,
+        domainName,
+        level,
+        amount: price,
+        currency: 'INR',
+        paymentStatus: isFree ? 'free' : 'paid',
+        cashfreeOrderId: isFree ? '' : orderId,
+        verifiedByBackend: true,
+        createdAt: issuedAt
+      });
+      transaction.set(db.collection('certificates').doc(nextCertId), {
+        type: 'skill_course',
+        uid: decodedToken.uid,
+        studentName: attempt.studentName || decodedToken.name || decodedToken.email || '',
+        email: String(decodedToken.email || '').toLowerCase(),
+        domain: domainName,
+        courseId,
+        courseTitle,
+        level,
+        score: Number(attempt.score || 0),
+        passingPercentage,
+        verified: true,
+        issueDate: issuedAt
+      });
+      transaction.set(claimRef, {
+        uid: decodedToken.uid,
+        courseId,
+        courseIdentity,
+        certificateId: nextCertId,
+        updatedAt: issuedAt
+      });
+      return nextCertId;
     });
-    batch.set(db.collection('certificates').doc(certId), {
-      type: 'skill_course',
-      uid: decodedToken.uid,
-      studentName: attempt.studentName || decodedToken.name || decodedToken.email || '',
-      email: String(decodedToken.email || '').toLowerCase(),
-      domain: domainName,
-      courseId,
-      courseTitle,
-      level,
-      score: Number(attempt.score || 0),
-      passingPercentage,
-      verified: true,
-      issueDate: issuedAt
-    });
-    await batch.commit();
     sendJson(res, 200, { certificateId: certId }, origin);
   } catch (error) {
     sendJson(res, 400, { error: error.message || 'Could not unlock skill certificate.' }, origin);
