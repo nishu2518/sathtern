@@ -23,6 +23,8 @@ const ALLOWED_ITEMS = new Map([
 ]);
 
 const allowedOrigins = new Set([
+  'http://localhost:3000',
+  'http://127.0.0.1:3000',
   'http://localhost:5000',
   'http://127.0.0.1:5000',
   'http://localhost:5002',
@@ -456,5 +458,4 @@ const port = process.env.PORT || 10000;
 server.listen(port, () => {
   console.log(`Sathtern Cashfree backend listening on ${port}`);
 });
-
 
