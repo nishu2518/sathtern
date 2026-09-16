@@ -407,6 +407,84 @@ async function claimSkillCertificate(req, res, origin) {
   }
 }
 
+async function submitSkillAttempt(req, res, origin) {
+  let decodedToken;
+  let body;
+  try {
+    body = await getBody(req);
+    decodedToken = await verifyFirebaseUser(req);
+  } catch (error) {
+    sendJson(res, 401, { error: 'Login is required to submit a skill assessment.' }, origin);
+    return;
+  }
+
+  try {
+    const courseId = String(body.courseId || '').trim();
+    const answers = Array.isArray(body.answers) ? body.answers.map(answer => Number(answer)) : [];
+    if (!courseId) throw new Error('Skill course ID is required.');
+
+    const db = admin.firestore();
+    const courseSnap = await db.collection('skillCourses').doc(courseId).get();
+    if (!courseSnap.exists) throw new Error('Skill course was not found.');
+
+    const course = courseSnap.data() || {};
+    if (course.active === false) throw new Error('Skill course is not active.');
+
+    const questions = Array.isArray(course.questions) ? course.questions : [];
+    if (!questions.length) throw new Error('This skill course has no questions.');
+    if (answers.length !== questions.length) throw new Error('Please answer all questions before submitting.');
+
+    let correct = 0;
+    questions.forEach((question, index) => {
+      const answerIndex = answers[index];
+      const options = Array.isArray(question.options) ? question.options : [];
+      if (!Number.isInteger(answerIndex) || answerIndex < 0 || answerIndex >= options.length) {
+        throw new Error('Invalid answer submitted.');
+      }
+      if (answerIndex === Number(question.answerIndex)) correct += 1;
+    });
+
+    const totalQuestions = questions.length;
+    const score = Math.round((correct / totalQuestions) * 100);
+    const passingPercentage = Number(course.passingPercentage || 60);
+    const passed = score >= passingPercentage;
+    const attemptId = `${decodedToken.uid}_${courseId}`;
+    const attempt = {
+      uid: decodedToken.uid,
+      email: String(decodedToken.email || '').toLowerCase(),
+      studentName: decodedToken.name || decodedToken.email || '',
+      courseId,
+      courseTitle: course.title || course.domainName || 'Skill Course',
+      domainName: course.domainName || '',
+      level: course.level || 'beginner',
+      totalQuestions,
+      correct,
+      score,
+      passed,
+      passingPercentage,
+      answers,
+      submittedAt: admin.firestore.FieldValue.serverTimestamp(),
+      gradedByBackend: true
+    };
+
+    await db.collection('skillCourseAttempts').doc(attemptId).set(attempt, { merge: true });
+    sendJson(res, 200, {
+      attemptId,
+      courseId,
+      courseTitle: attempt.courseTitle,
+      domainName: attempt.domainName,
+      level: attempt.level,
+      totalQuestions,
+      correct,
+      score,
+      passed,
+      passingPercentage
+    }, origin);
+  } catch (error) {
+    sendJson(res, 400, { error: error.message || 'Could not submit skill assessment.' }, origin);
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   const origin = req.headers.origin || '';
 
@@ -420,7 +498,8 @@ const server = http.createServer(async (req, res) => {
       ok: true,
       service: 'Sathtern Cashfree backend',
       paymentEndpoint: '/create-cashfree-order',
-      skillCertificateEndpoint: '/claim-skill-certificate'
+      skillCertificateEndpoint: '/claim-skill-certificate',
+      skillAttemptEndpoint: '/submit-skill-attempt'
     }, origin);
     return;
   }
@@ -441,6 +520,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && req.url === '/submit-skill-attempt') {
+    sendJson(res, 200, {
+      ok: true,
+      message: 'Use POST /submit-skill-attempt from the Sathtern website.'
+    }, origin);
+    return;
+  }
+
   if (req.method === 'POST' && (req.url === '/create-cashfree-order' || req.url === '/')) {
     await createCashfreeOrder(req, res, origin);
     return;
@@ -448,6 +535,11 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'POST' && req.url === '/claim-skill-certificate') {
     await claimSkillCertificate(req, res, origin);
+    return;
+  }
+
+  if (req.method === 'POST' && req.url === '/submit-skill-attempt') {
+    await submitSkillAttempt(req, res, origin);
     return;
   }
 
