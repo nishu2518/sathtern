@@ -290,6 +290,23 @@ function skillCourseIdentity(value) {
     .replace(/^-|-$/g, '') || 'skill-course';
 }
 
+function cleanStudentName(name) {
+  return String(name || '').replace(/\s+/g, ' ').trim();
+}
+
+function assertValidStudentName(name) {
+  const clean = cleanStudentName(name);
+  if (clean.length < 2) throw new Error('Full name is required.');
+  if (clean.length > 80) throw new Error('Full name is too long.');
+  return clean;
+}
+
+async function getStudentDisplayName(db, decodedToken) {
+  const userSnap = await db.collection('users').doc(decodedToken.uid).get();
+  const profileName = userSnap.exists ? cleanStudentName(userSnap.data().name) : '';
+  return profileName || cleanStudentName(decodedToken.name) || decodedToken.email || '';
+}
+
 async function claimSkillCertificate(req, res, origin) {
   let decodedToken;
   let body;
@@ -449,10 +466,11 @@ async function submitSkillAttempt(req, res, origin) {
     const passingPercentage = Number(course.passingPercentage || 60);
     const passed = score >= passingPercentage;
     const attemptId = `${decodedToken.uid}_${courseId}`;
+    const studentName = await getStudentDisplayName(db, decodedToken);
     const attempt = {
       uid: decodedToken.uid,
       email: String(decodedToken.email || '').toLowerCase(),
-      studentName: decodedToken.name || decodedToken.email || '',
+      studentName,
       courseId,
       courseTitle: course.title || course.domainName || 'Skill Course',
       domainName: course.domainName || '',
@@ -485,6 +503,56 @@ async function submitSkillAttempt(req, res, origin) {
   }
 }
 
+async function syncStudentName(req, res, origin) {
+  let decodedToken;
+  let body;
+  try {
+    body = await getBody(req);
+    decodedToken = await verifyFirebaseUser(req);
+  } catch (error) {
+    sendJson(res, 401, { error: 'Login is required to update your name.' }, origin);
+    return;
+  }
+
+  try {
+    const name = assertValidStudentName(body.name);
+    const db = admin.firestore();
+    const batch = db.batch();
+    const now = admin.firestore.FieldValue.serverTimestamp();
+
+    batch.set(db.collection('users').doc(decodedToken.uid), {
+      name,
+      email: String(decodedToken.email || '').toLowerCase(),
+      updatedAt: now
+    }, { merge: true });
+
+    const [attemptsSnap, certificatesSnap, ordersSnap] = await Promise.all([
+      db.collection('skillCourseAttempts').where('uid', '==', decodedToken.uid).get(),
+      db.collection('certificates').where('uid', '==', decodedToken.uid).where('type', '==', 'skill_course').get(),
+      db.collection('skillCertificateOrders').where('uid', '==', decodedToken.uid).get()
+    ]);
+
+    let updated = 0;
+    attemptsSnap.forEach(doc => {
+      batch.update(doc.ref, { studentName: name, updatedAt: now });
+      updated += 1;
+    });
+    certificatesSnap.forEach(doc => {
+      batch.update(doc.ref, { studentName: name, updatedAt: now });
+      updated += 1;
+    });
+    ordersSnap.forEach(doc => {
+      batch.update(doc.ref, { studentName: name, updatedAt: now });
+      updated += 1;
+    });
+
+    await batch.commit();
+    sendJson(res, 200, { ok: true, name, updatedRecords: updated }, origin);
+  } catch (error) {
+    sendJson(res, 400, { error: error.message || 'Could not update your name.' }, origin);
+  }
+}
+
 const server = http.createServer(async (req, res) => {
   const origin = req.headers.origin || '';
 
@@ -499,7 +567,8 @@ const server = http.createServer(async (req, res) => {
       service: 'Sathtern Cashfree backend',
       paymentEndpoint: '/create-cashfree-order',
       skillCertificateEndpoint: '/claim-skill-certificate',
-      skillAttemptEndpoint: '/submit-skill-attempt'
+      skillAttemptEndpoint: '/submit-skill-attempt',
+      studentNameSyncEndpoint: '/sync-student-name'
     }, origin);
     return;
   }
@@ -528,6 +597,14 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'GET' && req.url === '/sync-student-name') {
+    sendJson(res, 200, {
+      ok: true,
+      message: 'Use POST /sync-student-name from the Sathtern website.'
+    }, origin);
+    return;
+  }
+
   if (req.method === 'POST' && (req.url === '/create-cashfree-order' || req.url === '/')) {
     await createCashfreeOrder(req, res, origin);
     return;
@@ -543,6 +620,11 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === 'POST' && req.url === '/sync-student-name') {
+    await syncStudentName(req, res, origin);
+    return;
+  }
+
   sendJson(res, 404, { error: 'Not found' }, origin);
 });
 
@@ -550,4 +632,5 @@ const port = process.env.PORT || 10000;
 server.listen(port, () => {
   console.log(`Sathtern Cashfree backend listening on ${port}`);
 });
+
 
